@@ -1,0 +1,144 @@
+image: kilabs/cloud-engineer-challenge-calculator:latest
+
+options:
+  docker: true
+
+definitions:
+  steps:   
+    - step: &run-tests
+        name: "Run Tests"
+        script:
+          - npm install -y -g mocha
+          - for test in $(find -type d -iname test); do 
+              npx mocha $test ;
+            done
+    - step: &run-build-client
+        name: "Run Build client"
+        script:
+          - docker build services/client -t client:latest -f services/client/Dockerfile
+          - docker save client:latest --output client.tar
+        artifacts: [ client.tar ]
+    - step: &run-build-addition
+        name: "Run Build addition"
+        script:
+          - docker build services/addition -t addition:latest -f services/addition/Dockerfile
+          - docker save addition:latest --output addition.tar
+        artifacts: [ addition.tar ]
+        caches: [ docker ]
+    - step: &run-build-division
+        name: "Run Build division"
+        script:
+          - docker build services/division -t division:latest -f services/division/Dockerfile
+          - docker save division:latest --output division.tar
+        artifacts: [ division.tar ]
+        caches: [ docker ]
+    - step: &run-build-multiplication
+        name: "Run Build multiplication"
+        script:
+          - docker build services/division -t multiplication:latest -f services/multiplication/Dockerfile
+          - docker save multiplication:latest --output multiplication.tar
+        artifacts: [ multiplication.tar ]
+        caches: [ docker ]
+    - step: &run-build-subtraction
+        name: "Run Build subtraction"
+        script:
+          - docker build services/subtraction -t subtraction:latest -f services/subtraction/Dockerfile
+          - docker save subtraction:latest --output subtraction.tar
+        artifacts: [ subtraction.tar ]
+        caches: [ docker ]
+    - step: &run-build-remainder
+        name: "Run Build remainder"
+        script:
+          - docker build services/remainder -t remainder:latest -f services/remainder/Dockerfile
+          - docker save remainder:latest --output remainder.tar
+        artifacts: [ remainder.tar ]
+        caches: [ docker ]
+    - step: &run-build-calculator
+        name: "Run Build calculator"
+        script:
+          - docker build services/calculator -t calculator:latest -f services/calculator/Dockerfile
+          - docker save calculator:latest --output calculator.tar
+        artifacts: [ calculator.tar ]
+        caches: [ docker ]
+    - step: &run-ci
+        name: Push container images (CI)
+        image: alpine:latest
+        script: 
+          - docker login --username $DOCKER_USERNAME --password $DOCKER_PASSWORD
+          - find . -iname '*.tar' -exec docker load --input {} \;
+          - NEW_TAG="${BITBUCKET_BRANCH/\//-}.v$BITBUCKET_BUILD_NUMBER"
+          - NEW_TAG_LATEST="latest-${BITBUCKET_BRANCH/\//-}"
+          - for image in $(docker images --format "{{.Repository}}" --filter "dangling=false"); do
+              docker tag $image "jsoliveira/api-services-${image#*:}:$NEW_TAG";
+              docker tag $image "jsoliveira/api-services-${image#*:}:$NEW_TAG_LATEST" ;
+              docker push "jsoliveira/api-services-${image#*:}:$NEW_TAG";
+              docker push "jsoliveira/api-services-${image#*:}:$NEW_TAG_LATEST";
+            done
+    - step: &run-cd
+        name: Run Deploy (CD)
+        image: alpine:latest
+        deployment: test
+        script: 
+          - apk add yq git
+          - find . -iname '*.tar' -exec docker load --input {} \;
+          - NEW_TAG="${BITBUCKET_BRANCH/\//-}.v$BITBUCKET_BUILD_NUMBER"
+          # it can me moved into the bitbucket deployment variables
+          - case $BITBUCKET_DEPLOYMENT_ENVIRONMENT in
+              prod*) CLUSTER="aks01-prod" ;;
+              test|*) CLUSTER="aks01-dev" ;;
+            esac
+          # update the images[] in in the cluster 
+          - for image in $(docker images --format "{{.Repository}}" --filter "dangling=false"); do
+              KUSTOMIZATION=$(find kubernetes/$CLUSTER/ -iname "kustomization.y*ml" -print -quit);
+              IMAGE="*${image#*:}"; 
+              IMAGE_OBJECT="{\"name\":\"$IMAGE\",\"newTag\":\"$NEW_TAG\"}";
+              yq eval -i ".images = ([.images[] | select(.name != \"*$IMAGE*\")] + $IMAGE_OBJECT)" $KUSTOMIZATION;
+              git add $KUSTOMIZATION;              
+            done
+          # for demo purposes only - changes shoud be done thru BB api and in a separate K8s repository
+          - git clean -d -f
+          - git commit -m "release to $BITBUCKET_DEPLOYMENT_ENVIRONMENT [skip ci]";
+          - git push -u origin ${BITBUCKET_BRANCH}   
+
+pipelines:
+  default:
+    - step: *run-tests
+    - parallel:
+      - step: *run-build-client
+      - step: *run-build-addition
+      - step: *run-build-division
+      - step: *run-build-multiplication
+      - step: *run-build-subtraction
+      - step: *run-build-calculator
+    - step: *run-ci
+    
+  branches:
+    'develop':
+      - step: *run-tests
+      - parallel:
+        - step: *run-build-client
+        - step: *run-build-addition
+        - step: *run-build-division
+        - step: *run-build-multiplication
+        - step: *run-build-subtraction
+        - step: *run-build-calculator
+      - step: *run-ci
+      - step: 
+            <<: *run-cd
+            name: Run Deploy to test (CD)
+            deployment: test
+     
+    'master':
+      - step: *run-tests
+      - parallel:
+        - step: *run-build-client
+        - step: *run-build-addition
+        - step: *run-build-division
+        - step: *run-build-multiplication
+        - step: *run-build-subtraction
+        - step: *run-build-calculator
+      - step: *run-ci
+      - step:
+          <<: *run-cd
+          name: "Run Deploy to prod (CD)"
+          deployment: production

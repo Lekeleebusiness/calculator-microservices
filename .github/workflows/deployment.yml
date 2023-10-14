@@ -1,0 +1,63 @@
+name: Deploy to K8s
+
+on:
+  workflow_run:
+    branches: 
+      - develop
+      - master
+    workflows: 
+      - Build
+    types:
+      - completed
+      
+env:
+  BRANCH_NAME: "${GITHUB_REF##*/}"
+  TAG: "${BRANCH_NAME}.v$GITHUB_RUN_ID"
+  
+jobs:
+  deployment-dev:
+    if: github.ref == 'refs/heads/develop'
+    environment: development
+    env:
+      CLUSTER: aks01-dev
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v2
+    - uses: dawidd6/action-git-user-config@v1
+    - name: Deploy to dev
+      run: |-    
+       for service in $(ls services | grep -v base); do
+           IMAGE="*${service}"; 
+           IMAGE_OBJECT="{\"name\":\"$IMAGE\",\"newTag\":\"$TAG\"}";
+           KUSTOMIZATION="kubernetes/$CLUSTER/kustomization.yaml";
+           yq eval -i ".images = ([.images[] | select(.name != \"*$IMAGE*\")] + $IMAGE_OBJECT)" $KUSTOMIZATION;
+           git add $KUSTOMIZATION;              
+        done
+        git clean -d -f
+        git commit -m "release to development [skip ci]";
+        git push -u origin ${BRANCH_NAME}
+        
+  deployment-prod:
+    if: github.ref == 'refs/heads/master'
+    environment: production
+    env:
+      CLUSTER: aks01-prod
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v2
+    - uses: dawidd6/action-git-user-config@v1
+    - name: Deploy to prod
+      run: |-    
+       BRANCH_NAME="${GITHUB_REF##*/}"
+       for service in $(ls services | grep -v base); do
+           KUSTOMIZATION=$(find kubernetes/$CLUSTER/ -iname "kustomization.y*ml" -print -quit);
+           IMAGE="*${service}"; 
+           NEW_TAG="${BRANCH_NAME}.v$GITHUB_RUN_ID"
+           IMAGE_OBJECT="{\"name\":\"$IMAGE\",\"newTag\":\"$NEW_TAG\"}";
+           yq eval -i ".images = ([.images[] | select(.name != \"*$IMAGE*\")] + $IMAGE_OBJECT)" $KUSTOMIZATION;
+           git add $KUSTOMIZATION;              
+        done
+        git clean -d -f
+        git commit -m "release to production [skip ci]";
+        git push -u origin ${BRANCH_NAME}
+      
